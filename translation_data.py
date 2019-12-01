@@ -2,7 +2,6 @@
 
 from pathlib import Path
 import unicodedata
-import json
 
 import spacy
 import torch
@@ -14,15 +13,15 @@ class TranslationVocabulary:
     Does not handle out-of-vocabulary (OOV) words. (maybe future #@todo?)
     """
 
-    # OOV_ID = 3  # out of vocabulary code
     PAD_ID = 0  # not a word (padding) code
     SOS_ID = 1  # start-of-sequence code
     EOS_ID = 2  # end-of-sequence code
+    # OOV_ID = 3  # out of vocabulary code
 
     def __init__(self):
 
-        self.word2id = {'': self.PAD_ID, '<EOS>': self.EOS_ID, '<SOS': self.SOS_ID}
-        self.id2word = {self.PAD_ID: '', self.EOS_ID: '<EOS>', self.SOS_ID: '<SOS>'}
+        self.word2id = {'<pad>': self.PAD_ID, '<eos>': self.EOS_ID, '<sos>': self.SOS_ID}
+        self.id2word = {self.PAD_ID: '', self.EOS_ID: '<eos>', self.SOS_ID: '<sos>'}
         self.chars = set()  # set of all encountered characters
 
     def get(self, word: str, adding=False):
@@ -75,16 +74,16 @@ def normalize(text: str):
 
     return ''.join(c for c in unicodedata.normalize('NFD', text.lower().strip().replace(u'\u202f', ' ')))
 
-def tokenize_space(text: str):
+def tokenize_on_space(text: str, lang=None):
     """Tokenizes text simply by separating on spaces"""
     return text.split(' ')
 
-def tokenize(text: str, spacy_lang):
+def tokenize_spacy(text: str, spacy_lang='en'):
     """Tokenizes text using a spaCy model"""
-    #@todo
-    pass
+    return [token.text for token in spacy_lang.tokenizer(text)]
 
-def process(datapath, max_len=float('inf')):
+
+def process(datapath, tokenize, max_len):
     """Pre-processes the Anki dataset of sentence pairs (https://www.manythings.org/anki/).
     The steps:
         - Get origin and destination sentences from every line in the file;
@@ -98,6 +97,12 @@ def process(datapath, max_len=float('inf')):
     Returns:
         list: list of tokenized pairs of sentences
     """
+    if tokenize == tokenize_spacy:  # load spaCy models
+        orig_lang = spacy.load('fr')
+        dest_lang = spacy.load('en')
+    else:
+        orig_lang = dest_lang = None
+
     sentences = list()
     with open(datapath, 'r') as fp:
         for line in fp:
@@ -107,26 +112,23 @@ def process(datapath, max_len=float('inf')):
             orig, dest = map(normalize, line.split('\t')[:2])
             if len(orig) > max_len:
                 continue
-            # simple tokenize
-            #@todo: tokenize the sentences using spaCy
-            orig, dest = map(tokenize_space, (orig, dest))
-            # encode sentences as integers
+            # tokenize sentences
+            orig, dest = map(tokenize, (orig, dest), (orig_lang, dest_lang))
             sentences.append((orig, dest))
     return sentences
 
 
 class TranslationDataset(Dataset):
     """Dataset for Anki Translation sentence pairs (https://www.manythings.org/anki/)"""
+    #@todo:
+    # Later, when we'll need to use spaCy models, maybe save processed data to avoid
+    # loading models again.
+    def __init__(self, datapath, vocab_orig, vocab_dest, tokenize=tokenize_on_space,
+                 max_len=10):
 
-    def __init__(self, datapath, vocab_orig, vocab_dest, max_len=10):
-
-        #@todo: refactor achicteture of data processing:
-        # - don't build vocabularies when processing data, but only after
-        # -> don't need to serialize vocabulary, only processed sentences
-        # - Or: don't care and don't seralize anything (this is okay I believe)
         datapath = Path(datapath)
-        processed = process(datapath, max_len)
-        # build vocabs and tensors
+        processed = process(datapath, tokenize, max_len)
+        # build vocabs and numericalize
         sentences = [(vocab_orig.get_sentence(orig, adding=True),
                       vocab_dest.get_sentence(dest, adding=True))
                      for orig, dest in processed]
@@ -152,14 +154,15 @@ class TranslationDataset(Dataset):
         return (pad_sequence(data), lengths, pad_sequence(target))
 
 
-def get_dataloader_and_vocabs(batch_size, max_len):
+def get_dataloader_and_vocabs(batch_size, tokenize, max_len):
 
     orig_vocab = TranslationVocabulary()
     dest_vocab = TranslationVocabulary()
 
     #@todo: Here we cheat for simplicity: add all the words to the vocabularies in either train,
     # test or val set.
-    dataset = TranslationDataset('./data/fra.txt', orig_vocab, dest_vocab, max_len=max_len)
+    dataset = TranslationDataset('./data/fra.txt', orig_vocab, dest_vocab, tokenize,
+                                 max_len)
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         collate_fn=dataset.collate,
@@ -208,7 +211,8 @@ if __name__ == '__main__':
 
     # Test dataloading
     train_loader, orig_vocab, dest_vocab = \
-        get_dataloader_and_vocabs(batch_size=16, max_len=10)
+        get_dataloader_and_vocabs(batch_size=16, tokenize=tokenize_on_space,
+                                  max_len=10)
 
     print("Train batch:")
     data, lengths, target = next(iter(train_loader))
